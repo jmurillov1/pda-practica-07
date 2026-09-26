@@ -8,7 +8,7 @@ module.exports = {
     env: {
       NODE_ENV: "production",
       PORT: 3000,
-      CORS_ORIGIN: ""
+      CORS_ORIGIN: "https://app.jmurilloai.dev,http://localhost:4200"
     },
     error_file: "/var/www/empleados-backend/logs/err.log",
     out_file: "/var/www/empleados-backend/logs/out.log",
