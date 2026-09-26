@@ -1,22 +1,27 @@
 module.exports = {
-  apps : [{
-    script: 'index.js',
-    watch: '.'
-  }, {
-    script: './service-worker/',
-    watch: ['./service-worker']
+  apps: [{
+    name: "empleados-backend",
+    script: "./index.js",
+    instances: "max",
+    exec_mode: "cluster",
+    env: {
+      NODE_ENV: "production",
+      PORT: 3000
+    },
+    error_file: "/var/www/empleados-backend/logs/err.log",
+    out_file: "/var/www/empleados-backend/logs/out.log",
+    log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+    merge_logs: true
   }],
-
-  deploy : {
-    production : {
-      user : 'SSH_USERNAME',
-      host : 'SSH_HOSTMACHINE',
-      ref  : 'origin/master',
-      repo : 'GIT_REPOSITORY',
-      path : 'DESTINATION_PATH',
-      'pre-deploy-local': '',
-      'post-deploy' : 'npm install && pm2 reload ecosystem.config.js --env production',
-      'pre-setup': ''
+  deploy: {
+    production: {
+      user: 'ubuntu',
+      host: '44.215.90.212',
+      ref: 'origin/main',
+      repo: 'git@github.com:jmurillov1/pda-practica-07.git',
+      path: '/var/www/empleados-backend',
+      'post-deploy': 'mkdir -p logs && npm install && pm2 reload ecosystem.config.js --env production && pm2 save',
+      ssh_options: "IdentityFile=C:\\Users\\jmuri\\.ssh\\svr-01.pem",
     }
   }
 };
