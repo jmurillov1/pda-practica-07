@@ -1,12 +1,14 @@
 module.exports = {
   apps: [{
     name: "empleados-backend",
-    script: "./index.js",
+    cwd: "./backend",
+    script: "dist/main.js",
     instances: "max",
     exec_mode: "cluster",
     env: {
       NODE_ENV: "production",
-      PORT: 3000
+      PORT: 3000,
+      CORS_ORIGIN: "http://44.215.90.212"
     },
     error_file: "/var/www/empleados-backend/logs/err.log",
     out_file: "/var/www/empleados-backend/logs/out.log",
@@ -20,7 +22,10 @@ module.exports = {
       ref: 'origin/main',
       repo: 'git@github.com:jmurillov1/pda-practica-07.git',
       path: '/var/www/empleados-backend',
-      'post-deploy': 'mkdir -p logs && npm install && pm2 reload ecosystem.config.js --env production && pm2 save',
+      'post-deploy':
+        'corepack enable && ' +
+        'cd backend && pnpm install --frozen-lockfile && pnpm build && cd .. && ' +
+        'mkdir -p logs && pm2 reload backend/ecosystem.config.cjs --env production && pm2 save',
       ssh_options: "IdentityFile=~/.ssh/svr-01.pem",
     }
   }
