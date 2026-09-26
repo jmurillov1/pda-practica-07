@@ -17,7 +17,7 @@ export const createApiRouter = (employee: EmployeeController): Router => {
 
   // Endpoint de prueba para verificar el pipeline de CI/CD (pm2 deploy):
   router.get('/saludo', (_req, res) => {
-    ok(res, { mensaje: '¡Hola desde producción! 👋' }, 'Saludo generado');
+    ok(res, { mensaje: '¡Hola desde producción! 👋' }, 'Saludo generado v2');
   });
 
   router.use(createEmployeeRouter(employee));

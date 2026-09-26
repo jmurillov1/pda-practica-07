@@ -1,8 +1,11 @@
-# Práctica 07: Despliegue de Aplicaciones Node.js en Producción (AWS + Nginx + PM2)
+# Práctica 07: Despliegue de Aplicaciones Node.js en Producción (AWS + Nginx + PM2 + Azure + Cloudflare)
 
 Este repositorio contiene el CRUD de Gestión de Personal (Express + Mongoose + Angular) usado como
 base para practicar el **despliegue en producción** de una aplicación Node.js, según la guía
 [`docs/PDA06-Despliegue (1).pdf`](docs/PDA06-Despliegue%20%281%29.pdf) de la Maestría en Software.
+Sobre esa base se extendió el despliegue a un esquema **multi-nube**: el backend (API) sigue en AWS EC2
+con Nginx + PM2 como pide la guía, y el frontend (Angular) se separó a **Azure Static Web Apps**, con
+**Cloudflare** administrando el dominio propio y el HTTPS de ambos.
 
 ## 🎯 Objetivos de la práctica
 
@@ -33,28 +36,32 @@ practica-07/
 
 ---
 
-## 🏗️ Arquitectura de producción objetivo
+## 🏗️ Arquitectura de producción
+
+El frontend y el backend viven en **nubes distintas** (Azure y AWS), unidos por DNS/HTTPS de Cloudflare:
 
 ```
-Internet
-   │  80/443 (HTTP/HTTPS)            🔒 SG: 22 solo "Mi IP", 3000 CERRADO
-   ▼
-┌─────────────────────── AWS EC2 (IP elástica) ───────────────────────┐
-│                                                                      │
-│   Nginx :80  ──── /            → frontend/dist/frontend/browser     │
-│               └── /api/        → proxy_pass http://localhost:3000   │
-│                                       │                              │
-│                          PM2 (modo cluster, todos los vCPU)         │
-│                          backend/dist/main.js  (Express + Mongoose) │
-│                                       │                              │
-└───────────────────────────────────────┼──────────────────────────────┘
-                                          ▼
-                              MongoDB (Atlas / servicio administrado
-                              — NO en la misma instancia EC2)
+                              Navegador
+                                  │
+                    ┌─────────── Cloudflare (DNS + HTTPS) ───────────┐
+                    │                                                 │
+      app.TU_DOMINIO (CNAME, Proxied)                 api.TU_DOMINIO (A, Proxied + SSL Full)
+                    │                                                 │
+                    ▼                                                 ▼
+     Azure Static Web Apps                          AWS EC2 (IP elástica) — SG: 22 "Mi IP", 3000 CERRADO
+     (build Angular servido por CDN)                 Nginx :443 (cert. origen Cloudflare) → :3000
+                                                                      │
+                                                        PM2 (modo cluster, todos los vCPU)
+                                                        backend/dist/main.js (Express + Mongoose)
+                                                                      │
+                                                                      ▼
+                                                  MongoDB Atlas (servicio administrado,
+                                                  NO en la misma instancia EC2)
 ```
 
 `pm2-discord` observa la app y notifica caídas/errores a un canal de Discord vía webhook.
-`pm2-logrotate` evita que los logs llenen el disco.
+`pm2-logrotate` evita que los logs llenen el disco. El frontend (Azure) y el backend (EC2) se despliegan
+con pipelines de CI/CD independientes (GitHub Actions y `pm2 deploy`, respectivamente).
 
 ---
 
@@ -62,17 +69,22 @@ Internet
 
 | Elemento | Valor |
 |---|---|
-| IP elástica | `TU_IP_ELASTICA_AQUÍ` |
+| Dominio del frontend | `https://app.TU_DOMINIO` (Cloudflare → Azure Static Web Apps) |
+| Dominio de la API | `https://api.TU_DOMINIO` (Cloudflare Proxied → IP elástica EC2) |
+| IP elástica (origen de la API) | `TU_IP_ELASTICA_AQUÍ` |
 | Ruta de despliegue en EC2 | `/var/www/empleados-backend` |
 | Repositorio (deploy) | `git@github.com:jmurillov1/pda-practica-07.git` (rama `main`) |
 | Nombre de app en PM2 | `empleados-backend` |
 | Puerto interno del backend | `3000` (cerrado al exterior, solo accesible vía Nginx) |
-| Puertos públicos | `80` (HTTP), `443` (HTTPS, pendiente Certbot), `22` (SSH, restringido a "Mi IP") |
+| Puertos públicos EC2 | `443` (HTTPS, hacia Cloudflare — modo Full), `80` (redirección), `22` (SSH, restringido a "Mi IP") |
+| Certificado de origen | Emitido por Cloudflare (Origin CA), instalado en Nginx, válido solo para tráfico Cloudflare↔EC2 |
 | Logs de la app | `/var/www/empleados-backend/logs/{out,err}.log` |
 | Endpoint de salud | `GET /api/v1/health` → `{ "data": { "status": "ok", "database": "connected" } }` |
 | Config Nginx | `/etc/nginx/sites-available/default` |
 | Ecosistema PM2 | `backend/ecosystem.config.cjs` (dentro del repo, se ejecuta `pm2 deploy` desde `backend/`) |
 | `.env` de producción | `/var/www/empleados-backend/source/backend/.env` (creado a mano en el servidor, con `MONGO_URI` de Atlas) |
+| Frontend en Azure | Static Web Apps, plan Free, deploy vía GitHub Actions |
+| Workflow del frontend | `.github/workflows/azure-static-web-apps-*.yml` |
 
 ---
 
@@ -81,8 +93,9 @@ Internet
 ### Fase 1: Red y firewall (AWS)
 
 1. **Grupo de seguridad** de la instancia EC2 → *Editar reglas de entrada*:
-   - HTTP · puerto `80` · origen `0.0.0.0/0`
-   - HTTPS · puerto `443` · origen `0.0.0.0/0`
+   - HTTPS · puerto `443` · origen `0.0.0.0/0` (Cloudflare habla con Nginx por HTTPS en modo **Full** —
+     ver Fase 8; requiere el certificado de origen de Cloudflare instalado en Nginx)
+   - HTTP · puerto `80` · origen `0.0.0.0/0` (Nginx lo deja solo para redirigir a `443`)
    - SSH · puerto `22` · origen **Mi IP** (nunca `Anywhere`)
    - El puerto `3000` de Node.js **no** se abre públicamente.
 2. **IP elástica**: EC2 → *Red y seguridad* → *IP elásticas* → *Asignar* → *Asociar* a la instancia.
@@ -123,23 +136,28 @@ sudo systemctl status nginx
 > pnpm --version
 > ```
 
-Reemplaza `/etc/nginx/sites-available/default` para servir el build de Angular y reenviar `/api/` al backend:
+Reemplaza `/etc/nginx/sites-available/default`. El frontend **ya no se sirve desde aquí** (vive en Azure
+Static Web Apps, Fase 7): este Nginx solo hace de proxy inverso hacia la API para el dominio
+`api.TU_DOMINIO`, y termina HTTPS con el **certificado de origen de Cloudflare** (Fase 8, modo **Full**):
 
 ```nginx
 server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
+    listen 80;
+    listen [::]:80;
+    server_name api.TU_DOMINIO;
+    return 301 https://$host$request_uri;
+}
 
-    root /var/www/pda-practica-07/current/frontend/dist/frontend/browser;
-    index index.html;
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name api.TU_DOMINIO;
+
+    ssl_certificate     /etc/ssl/cloudflare/api.TU_DOMINIO.pem;      # Origin Certificate (Fase 8)
+    ssl_certificate_key /etc/ssl/cloudflare/api.TU_DOMINIO.key;
 
     location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    location /api/ {
-        proxy_pass http://localhost:3000/api/;
+        proxy_pass http://localhost:3000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -198,7 +216,8 @@ module.exports = {
     env: {
       NODE_ENV: "production",
       PORT: 3000,
-      CORS_ORIGIN: "http://TU_IP_ELASTICA_AQUÍ"
+      // Lista separada por comas: backend/src/app.ts la parte con .split(',')
+      CORS_ORIGIN: "https://app.TU_DOMINIO,http://localhost:4200"
       // MONGO_URI NO va aquí: se carga desde backend/.env, creado a mano en el servidor
     },
     error_file: "/var/www/empleados-backend/logs/err.log",
@@ -243,6 +262,9 @@ Notas (aprendidas en el propio despliegue):
 - Si la instancia es `t2.micro`/`t3.micro`, considera añadir swap antes de compilar Angular
   (`ng build` puede agotar la RAM disponible).
 - `ecosystem.config.cjs` sí se versiona (no contiene secretos).
+- **CORS multi-origen**: como el frontend (Azure) y la API (EC2) quedan en dominios distintos,
+  `backend/src/app.ts` separa `CORS_ORIGIN` por comas (`env.CORS_ORIGIN.split(',')`) para poder aceptar
+  a la vez el dominio de producción y `http://localhost:4200` en desarrollo.
 
 ### Fase 5: Despliegue inicial y CI/CD
 
@@ -295,17 +317,105 @@ curl -H "Content-Type: application/json" -d '{"content":"prueba manual"}' \
 PM2_DISCORD_DEBUG=1 pm2 install pm2-discord && pm2 logs pm2-discord   # logs verbosos
 ```
 
+### Fase 7: Frontend en Azure Static Web Apps
+
+1. Azure Portal → **Static Web Apps** → **Crear** → plan **Free** → origen del código **GitHub** →
+   seleccionar el repo y la rama `main`.
+2. Azure genera solo el recurso y un `.yml` de arranque en
+   `.github/workflows/azure-static-web-apps-<nombre-random>.yml` — **hay que corregirlo**: por defecto
+   Azure compila con **Oryx**, que detecta `package.json` pero no `pnpm-lock.yaml`, cae a `npm install`
+   y falla (`Cannot read properties of null (reading 'edgesOut')`) porque no hay lockfile de npm.
+3. Workflow corregido — compilar nosotros con `pnpm` y decirle a Azure que **no** vuelva a compilar:
+
+```yaml
+- uses: pnpm/action-setup@v4
+  with:
+    package_json_file: frontend/package.json   # respeta "packageManager": "pnpm@10.33.0"
+
+- uses: actions/setup-node@v4
+  with:
+    node-version: 24
+    cache: pnpm
+    cache-dependency-path: frontend/pnpm-lock.yaml
+
+- name: Install and build
+  working-directory: frontend
+  run: |
+    pnpm install --frozen-lockfile
+    pnpm build
+
+- uses: Azure/static-web-apps-deploy@v1
+  with:
+    azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_<TU_SUFIJO> }}
+    repo_token: ${{ secrets.GITHUB_TOKEN }}
+    action: "upload"
+    app_location: "frontend/dist/frontend/browser"  # ya compilado
+    api_location: ""
+    output_location: ""
+    skip_app_build: true   # evita que Oryx intente compilar de nuevo con npm
+```
+
+4. `frontend/src/environments/environment.ts` debe apuntar a la URL pública de la API
+   (`apiUrl: 'https://api.TU_DOMINIO/api/v1'`) — al vivir en dominios distintos, ya no aplica la ruta
+   relativa `/api/v1` que usaría un proxy same-origin.
+5. Cada push a `main` que toque `frontend/` dispara el workflow → build con pnpm → deploy automático.
+
+### Fase 8: Dominio propio y HTTPS con Cloudflare
+
+1. **Agregar el dominio a Cloudflare** y apuntar los nameservers del registrador a los que da Cloudflare.
+2. **Subdominio del frontend** (`app.TU_DOMINIO`):
+   - En Azure Static Web Apps → **Custom domains** → **Add** → tipo `CNAME` → te da el registro a crear.
+   - En Cloudflare DNS: `CNAME app → <tu-swa>.azurestaticapps.net`, modo **Proxied** (nube naranja).
+3. **Subdominio de la API** (`api.TU_DOMINIO`):
+   - En Cloudflare DNS: `A api → TU_IP_ELASTICA_AQUÍ`, modo **Proxied** (nube naranja).
+   - **Certificado de origen** (Cloudflare → **SSL/TLS → Origin Server** → **Create Certificate**):
+     genera un par clave/certificado válido ~15 años (solo lo reconoce Cloudflare, no navegadores
+     directos). Copiarlos a la EC2:
+     ```bash
+     sudo mkdir -p /etc/ssl/cloudflare
+     sudo nano /etc/ssl/cloudflare/api.TU_DOMINIO.pem   # pegar el certificado
+     sudo nano /etc/ssl/cloudflare/api.TU_DOMINIO.key   # pegar la llave privada
+     sudo chmod 600 /etc/ssl/cloudflare/api.TU_DOMINIO.key
+     sudo nginx -t && sudo systemctl reload nginx
+     ```
+   - En **SSL/TLS → Overview**, modo **Full**: Cloudflare habla con Nginx por HTTPS (puerto 443)
+     usando ese certificado de origen — ya no hay tramo en HTTP plano entre Cloudflare y la EC2.
+4. Actualizar `CORS_ORIGIN` en `backend/ecosystem.config.cjs` para incluir `https://app.TU_DOMINIO`, y
+   `apiUrl` en `frontend/src/environments/environment.ts` para usar `https://api.TU_DOMINIO/api/v1`.
+
 ---
 
-## ✅ Pruebas de verificación
+## ✅ Pruebas de verificación y resiliencia
 
-1. **Prueba de red**: abrir `http://TU_IP_ELASTICA_AQUÍ` en el navegador → debe verse la interfaz Angular,
-   sin necesidad de especificar `:3000`.
-2. **Prueba de resiliencia**: `pm2 stop empleados-backend` en EC2 → debe llegar una alerta al canal de
-   Discord. Restaurar con `pm2 start empleados-backend`.
-3. **Prueba de CI/CD**: hacer un cambio visual en local, `git push origin main`, ejecutar
-   `pm2 deploy production` (desde `backend/`) en el equipo local, y refrescar el navegador sin haber
-   tocado la consola de AWS.
+1. **Prueba de red**: abrir `https://app.TU_DOMINIO` en el navegador → debe verse la interfaz Angular
+   servida por Azure, consumiendo la API en `https://api.TU_DOMINIO`, ambos con candado HTTPS.
+2. **Caída controlada de la API** (hecha ✅): `pm2 stop empleados-backend` en la EC2 → llega una alerta al
+   canal de Discord (evento `stop`, activo por defecto en `pm2-discord`). Se restaura con
+   `pm2 start empleados-backend` y el frontend vuelve a responder sin redeploy.
+3. **Auto-recuperación de un worker del cluster**: con la app en modo `cluster` (`instances: "max"`),
+   matar un proceso hijo a la fuerza —
+   ```bash
+   pm2 list                       # ver los PID de cada worker
+   kill -9 <PID_DE_UN_WORKER>
+   pm2 list                       # el contador "↺" (restarts) sube y el proceso vuelve a "online" solo
+   ```
+   Mientras tanto, la API sigue respondiendo porque los demás workers del cluster atienden las peticiones.
+4. **Reload sin downtime**: dejar un monitor corriendo en local mientras se despliega —
+   ```bash
+   while true; do curl -s -o /dev/null -w "%{http_code}\n" https://api.TU_DOMINIO/api/v1/health; sleep 0.2; done
+   ```
+   y en paralelo, desde el equipo local, `pm2 deploy production`. Solo deben verse códigos `200`
+   (PM2 recarga los workers uno a uno, nunca todos a la vez).
+5. **Persistencia tras reinicio del servidor**: con `pm2 startup` + `pm2 save` ya configurados (Fase 5),
+   reiniciar la instancia EC2 (`sudo reboot`) y, al reconectar, `pm2 list` debe mostrar los procesos
+   `online` sin haber tenido que arrancarlos a mano.
+6. **Degradación controlada del frontend**: con el backend detenido, abrir `https://app.TU_DOMINIO` —
+   la interfaz (servida estáticamente desde Azure, independiente de la EC2) sigue cargando y muestra el
+   mensaje de error de la petición fallida, en vez de caerse todo el sistema.
+7. **Prueba de CI/CD**: hacer un cambio visual en `frontend/` (o un cambio de backend), `git push origin
+   main`. El frontend se redespliega solo vía GitHub Actions (Fase 7); para el backend, ejecutar además
+   `pm2 deploy production` desde `backend/` en el equipo local. Refrescar y confirmar el cambio sin haber
+   tocado la consola de AWS ni de Azure.
 
 ---
 
@@ -332,8 +442,9 @@ pnpm start     # http://localhost:4200
 ```
 
 En local, `frontend/src/environments/environment.development.ts` apunta a
-`http://localhost:3000/api/v1`. Para producción, `environment.ts` debería usar una ruta relativa
-(`apiUrl: '/api/v1'`), ya que en el servidor es Nginx quien resuelve `/api/` hacia el backend.
+`http://localhost:3000/api/v1`. En producción, `environment.ts` usa la URL absoluta de la API
+(`apiUrl: 'https://api.TU_DOMINIO/api/v1'`), porque el frontend (Azure) y el backend (EC2) son
+dominios distintos — ya no hay un Nginx same-origin que resuelva `/api/` por proxy.
 
 ### Base de datos local
 
@@ -350,9 +461,14 @@ Mongo Express queda disponible en `http://localhost:8081`.
 
 - `.env`, `backend/.env`, la llave `.pem` de AWS y la URL del webhook de Discord **nunca** se versionan
   (excluidos vía `.gitignore`). Solo se comparten los `.env.example` con valores de ejemplo (`change_me`).
-- El secreto `MONGO_URI` de producción vive únicamente en el servidor (`shared/.env`), fuera del
-  repositorio y fuera de `ecosystem.config.cjs`.
-- El puerto `3000` permanece cerrado al tráfico externo; todo el acceso público pasa por Nginx (80/443).
+- El secreto `MONGO_URI` de producción vive únicamente en el servidor (`backend/.env` en la EC2), fuera
+  del repositorio y fuera de `ecosystem.config.cjs`.
+- El puerto `3000` permanece cerrado al tráfico externo; todo el acceso público a la API pasa por
+  Nginx (`443`, HTTPS con certificado de origen) detrás de Cloudflare.
+- La llave privada del certificado de origen (`/etc/ssl/cloudflare/*.key`) vive solo en la EC2 con
+  permisos `600`; nunca se sube al repositorio.
+- El token de despliegue de Azure (`AZURE_STATIC_WEB_APPS_API_TOKEN_...`) vive solo como **secret** de
+  GitHub Actions, nunca en el código del workflow ni en el repositorio.
 
 ---
 
@@ -368,10 +484,16 @@ Mongo Express queda disponible en `http://localhost:8081`.
   producción con un solo comando desde el equipo local.
 - **Monitoreo proactivo**: los webhooks de Discord y la rotación de logs (`pm2-logrotate`) convierten
   la gestión de infraestructura en un modelo reactivo-a-proactivo, evitando además el llenado de disco.
+- **HTTPS de extremo a extremo**: con el certificado de origen de Cloudflare instalado en Nginx y el
+  modo **Full** activo, ya no queda ningún tramo en HTTP plano entre el visitante y la API.
 
 ## 📌 Recomendaciones para un entorno real
 
-- **HTTPS obligatorio**: adquirir un dominio y emitir un certificado SSL/TLS gratuito con
-  **Certbot (Let's Encrypt)** en vez de servir sobre IP + HTTP.
-- **Base de datos externalizada**: usar un servicio administrado (p. ej. **MongoDB Atlas** o AWS RDS)
-  en vez de instalar la base de datos en la misma instancia EC2 que la aplicación.
+- **Base de datos externalizada**: usar un servicio administrado (p. ej. **MongoDB Atlas**, ya en uso, o
+  AWS RDS) en vez de instalar la base de datos en la misma instancia EC2 que la aplicación.
+- **Rate limiting y `trust proxy`**: el backend está detrás de Nginx y Cloudflare pero no declara
+  `app.set('trust proxy', 1)` ni tiene `express-rate-limit`; sin esto, `req.ip` no refleja la IP real del
+  visitante y la API queda sin límite de peticiones.
+- **CI con verificación previa**: agregar un job de GitHub Actions que corra `pnpm lint`/`typecheck`/`test`
+  en cada Pull Request antes de permitir el merge a `main`, ya que hoy `pm2 deploy` despliega
+  directamente lo que haya en esa rama sin ninguna validación automática previa.
