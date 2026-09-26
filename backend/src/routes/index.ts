@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { EmployeeController } from '../controllers/employee.controller.js';
 import { createEmployeeRouter } from './employee.routes.js';
 import { getDatabaseStatus } from '../config/database.js';
+import { ok } from '../utils/response.js';
 
 export const createApiRouter = (employee: EmployeeController): Router => {
   const router = Router();
@@ -12,6 +13,11 @@ export const createApiRouter = (employee: EmployeeController): Router => {
       data: { status: 'ok', database: getDatabaseStatus() },
       message: 'Servicio operativo',
     });
+  });
+
+  // Endpoint de prueba para verificar el pipeline de CI/CD (pm2 deploy):
+  router.get('/saludo', (_req, res) => {
+    ok(res, { mensaje: '¡Hola desde producción! 👋' }, 'Saludo generado');
   });
 
   router.use(createEmployeeRouter(employee));
