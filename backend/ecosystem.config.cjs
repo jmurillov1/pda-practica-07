@@ -8,7 +8,7 @@ module.exports = {
     env: {
       NODE_ENV: "production",
       PORT: 3000,
-      CORS_ORIGIN: "http://44.215.90.212"
+      CORS_ORIGIN: ""
     },
     error_file: "/var/www/empleados-backend/logs/err.log",
     out_file: "/var/www/empleados-backend/logs/out.log",

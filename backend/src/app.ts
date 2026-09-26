@@ -12,7 +12,8 @@ export const createApp = ({ employeeController }: Dependencies): Express => {
   const app = express();
 
   app.use(helmet());
-  app.use(cors({ origin: env.CORS_ORIGIN }));
+  const allowedOrigins = env.CORS_ORIGIN.split(',').map((origin) => origin.trim());
+  app.use(cors({ origin: allowedOrigins.includes('*') ? '*' : allowedOrigins }));
   app.use(express.json());
   if (env.NODE_ENV !== 'test') {
     app.use(morgan('dev'));
