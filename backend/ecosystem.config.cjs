@@ -23,7 +23,6 @@ module.exports = {
       repo: 'git@github.com:jmurillov1/pda-practica-07.git',
       path: '/var/www/empleados-backend',
       'post-deploy':
-        'corepack enable && ' +
         'cd backend && pnpm install --frozen-lockfile && pnpm build && cd .. && ' +
         'mkdir -p logs && pm2 reload backend/ecosystem.config.cjs --env production && pm2 save',
       ssh_options: "IdentityFile=~/.ssh/svr-01.pem",
