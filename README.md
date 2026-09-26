@@ -63,15 +63,16 @@ Internet
 | Elemento | Valor |
 |---|---|
 | IP elástica | `TU_IP_ELASTICA_AQUÍ` |
-| Ruta de despliegue en EC2 | `/var/www/pda-practica-07` |
+| Ruta de despliegue en EC2 | `/var/www/empleados-backend` |
 | Repositorio (deploy) | `git@github.com:jmurillov1/pda-practica-07.git` (rama `main`) |
-| Nombre de app en PM2 | `pda-api` |
+| Nombre de app en PM2 | `empleados-backend` |
 | Puerto interno del backend | `3000` (cerrado al exterior, solo accesible vía Nginx) |
 | Puertos públicos | `80` (HTTP), `443` (HTTPS, pendiente Certbot), `22` (SSH, restringido a "Mi IP") |
-| Logs de la app | `/var/www/pda-practica-07/current/logs/{out,err}.log` |
+| Logs de la app | `/var/www/empleados-backend/logs/{out,err}.log` |
 | Endpoint de salud | `GET /api/v1/health` → `{ "data": { "status": "ok", "database": "connected" } }` |
 | Config Nginx | `/etc/nginx/sites-available/default` |
-| Ecosistema PM2 | `ecosystem.config.cjs` (raíz del repo, en el equipo local) |
+| Ecosistema PM2 | `backend/ecosystem.config.cjs` (dentro del repo, se ejecuta `pm2 deploy` desde `backend/`) |
+| `.env` de producción | `/var/www/empleados-backend/source/backend/.env` (creado a mano en el servidor, con `MONGO_URI` de Atlas) |
 
 ---
 
@@ -94,7 +95,10 @@ Conectado por SSH a la instancia (`ssh -i "tu-llave.pem" ubuntu@TU_IP_ELASTICA`)
 # Node.js LTS + npm
 curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
 sudo apt-get install -y nodejs
-sudo corepack enable   # habilita pnpm
+
+# pnpm (el backend lo usa: ver "packageManager" en backend/package.json)
+sudo npm install -g pnpm@10.33.0
+pnpm --version   # confirmar que responde 10.33.0
 
 # Git y herramientas de compilación (bcrypt, mongoose, etc. compilan C/C++)
 sudo apt install -y git build-essential
@@ -105,6 +109,19 @@ sudo apt install -y nginx
 sudo ufw allow 'Nginx Full'
 sudo systemctl status nginx
 ```
+
+> ⚠️ **`sudo corepack enable` falla en Ubuntu con `EACCES` al crear el symlink en `/usr/bin/pnpm`**
+> (el usuario `ubuntu` no tiene permisos ahí, y a veces el propio corepack deja el binario apuntando
+> a un caché roto en `~/.cache/node/corepack`). Por eso este README instala `pnpm` directamente con
+> `npm install -g` en vez de usar corepack. Si ya intentaste `corepack enable` y `pnpm --version`
+> falla con `Cannot find module '.../corepack/pnpm/.../pnpm.cjs'`, limpia el intento fallido antes:
+> ```bash
+> sudo rm -f /usr/bin/pnpm /usr/local/bin/pnpm
+> rm -rf ~/.cache/node/corepack
+> sudo npm install -g pnpm@10.33.0
+> hash -r
+> pnpm --version
+> ```
 
 Reemplaza `/etc/nginx/sites-available/default` para servir el build de Angular y reenviar `/api/` al backend:
 
@@ -166,66 +183,74 @@ En la instancia EC2, instalar PM2 global:
 sudo npm install pm2 -g
 ```
 
-En el **equipo local**, dentro de la raíz del repositorio, crear `ecosystem.config.cjs`
-(extensión `.cjs` porque el backend usa ESM nativo — un `.js` fallaría al cargarse con `require`):
+En el **equipo local**, el archivo real usado es [`backend/ecosystem.config.cjs`](backend/ecosystem.config.cjs)
+(vive dentro de `backend/`, no en la raíz, y por eso `pm2 deploy` se ejecuta desde ahí — ver Fase 5).
+Extensión `.cjs` porque el backend usa ESM nativo — un `.js` fallaría al cargarse con `require`:
 
 ```js
 module.exports = {
-  apps: [
-    {
-      name: 'pda-api',
-      cwd: './backend',
-      script: 'dist/main.js',
-      instances: 'max', // Modo Cluster: usa todos los núcleos de la CPU
-      exec_mode: 'cluster',
-      env: {
-        NODE_ENV: 'production',
-        PORT: 3000,
-        CORS_ORIGIN: 'http://TU_IP_ELASTICA_AQUÍ',
-        // MONGO_URI NO va aquí: se carga desde backend/.env (ver post-deploy)
-      },
-      error_file: '/var/www/pda-practica-07/logs/err.log',
-      out_file: '/var/www/pda-practica-07/logs/out.log',
-      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
-      merge_logs: true,
+  apps: [{
+    name: "empleados-backend",
+    cwd: "./backend",
+    script: "dist/main.js",
+    instances: "max",
+    exec_mode: "cluster",
+    env: {
+      NODE_ENV: "production",
+      PORT: 3000,
+      CORS_ORIGIN: "http://TU_IP_ELASTICA_AQUÍ"
+      // MONGO_URI NO va aquí: se carga desde backend/.env, creado a mano en el servidor
     },
-  ],
-
+    error_file: "/var/www/empleados-backend/logs/err.log",
+    out_file: "/var/www/empleados-backend/logs/out.log",
+    log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+    merge_logs: true
+  }],
   deploy: {
     production: {
       user: 'ubuntu',
       host: 'TU_IP_ELASTICA_AQUÍ',
       ref: 'origin/main',
       repo: 'git@github.com:jmurillov1/pda-practica-07.git',
-      path: '/var/www/pda-practica-07',
+      path: '/var/www/empleados-backend',
+      // ojo: el post-deploy corre desde la raíz del repo clonado (.../source), por eso
+      // hay que entrar a "backend" para instalar/compilar y referenciar la ruta completa al reload
       'post-deploy':
-        'ln -sf /var/www/pda-practica-07/shared/.env backend/.env && ' +
-        'pnpm install --frozen-lockfile --dir backend && pnpm --dir backend build && ' +
-        'pnpm install --frozen-lockfile --dir frontend && pnpm --dir frontend build && ' +
-        'mkdir -p /var/www/pda-practica-07/logs && ' +
-        'pm2 reload ecosystem.config.cjs --env production && pm2 save',
-      ssh_options: 'IdentityFile=~/.ssh/tu-llave-aws.pem',
-    },
-  },
+        'cd backend && pnpm install --frozen-lockfile && pnpm build && cd .. && ' +
+        'mkdir -p logs && pm2 reload backend/ecosystem.config.cjs --env production && pm2 save',
+      ssh_options: "IdentityFile=~/.ssh/svr-01.pem",
+    }
+  }
 };
 ```
 
-Notas:
-- `MONGO_URI` (secreto) vive solo en `/var/www/pda-practica-07/shared/.env` en el servidor —
-  **nunca** en `ecosystem.config.cjs` ni en el repositorio. Créalo una vez en EC2 con el mismo
-  formato de `backend/.env.example`, apuntando idealmente a un clúster **MongoDB Atlas** (recomendación
-  de la guía: no alojar la base de datos en la misma EC2 que la aplicación).
+Notas (aprendidas en el propio despliegue):
+- Este repo es un **monorepo** (`backend/` y `frontend/` como subcarpetas, sin `package.json` en la
+  raíz). La plantilla genérica de la guía asume `npm install`/`script: "./index.js"` en la raíz del
+  repo — con este proyecto eso falla con `ENOENT ... source/package.json`. Por eso el `post-deploy`
+  entra explícitamente a `backend/` y el `script` apunta a `dist/main.js` (el build compilado).
+- `corepack enable` **no** se usa en el `post-deploy` (falla con `EACCES` al no tener permisos de
+  `sudo` el usuario `ubuntu`). En su lugar, `pnpm` se instala una sola vez de forma global en el
+  servidor con `sudo npm install -g pnpm@10.33.0` (ver Fase 2).
+- `MONGO_URI` (secreto) vive solo en `/var/www/empleados-backend/source/backend/.env` en el
+  servidor — **nunca** en `ecosystem.config.cjs` ni en el repositorio. Se crea una sola vez a mano
+  (`nano backend/.env` dentro de esa ruta, con el mismo formato de `backend/.env.example`) apuntando
+  a un clúster **MongoDB Atlas** (recomendación de la guía: no alojar la base de datos en la misma
+  EC2 que la aplicación). Como `pm2 deploy` solo hace `git reset` sobre esa carpeta y `.env` está en
+  `.gitignore`, el archivo persiste entre despliegues.
+- En Atlas, agrega la IP elástica (`TU_IP_ELASTICA_AQUÍ`) en **Network Access** para que el backend pueda
+  conectarse.
 - Si la instancia es `t2.micro`/`t3.micro`, considera añadir swap antes de compilar Angular
   (`ng build` puede agotar la RAM disponible).
-- `ecosystem.config.cjs` sí se versiona (no contiene secretos); añádelo a `.gitignore` solo si en tu
-  caso decides incluir credenciales dentro de él.
+- `ecosystem.config.cjs` sí se versiona (no contiene secretos).
 
 ### Fase 5: Despliegue inicial y CI/CD
 
-Desde el equipo local:
+Desde el equipo local, **dentro de `backend/`** (donde vive `ecosystem.config.cjs`):
 
 ```bash
-pm2 deploy production setup   # prepara la estructura en /var/www/pda-practica-07
+cd backend
+pm2 deploy production setup   # prepara la estructura en /var/www/empleados-backend
 pm2 deploy production         # clona, instala, compila y levanta el proceso
 ```
 
@@ -242,33 +267,45 @@ equipo local; no se vuelve a tocar la consola de AWS.
 ### Fase 6: Monitorización, logs y alertas (Discord)
 
 ```bash
-# Webhook de Discord: servidor → Configuración → Integraciones → Webhooks → Nuevo webhook → copiar URL
+# Webhook de Discord: canal → Editar canal → Integraciones → Webhooks → Nuevo webhook → copiar URL
 
 # pm2-notify solo soporta SMTP; para Discord se usa el módulo dedicado pm2-discord
 pm2 install pm2-discord
-pm2 set pm2-discord:discord_url "URL_DE_TU_WEBHOOK_AQUÍ"
-pm2 set pm2-discord:events "exit,error"   # solo caídas/errores
+pm2 set pm2-discord:discord_url "https://discord.com/api/webhooks/TU_ID/TU_TOKEN"
+
+# ⚠️ pm2-discord NO tiene una clave "events" combinada: cada evento es un booleano propio.
+# Por defecto ya vienen activos: kill=true, exception=true, stop=true (log/error/exit/restart=false).
+pm2 set pm2-discord:error true
+pm2 set pm2-discord:exit true
 
 pm2 install pm2-logrotate   # rotación de logs, evita disco lleno
 
 pm2 save --force
-pm2 logs pm2-discord   # ver actividad del módulo de alertas
-pm2 list                # listar procesos
-pm2 stop pda-api        # detener
-pm2 start pda-api       # iniciar
+pm2 list                # confirma que "pm2-discord" aparece como módulo activo
+pm2 logs pm2-discord    # ver actividad del módulo de alertas
+pm2 stop empleados-backend    # detener (dispara el evento "stop" → notificación)
+pm2 start empleados-backend   # iniciar
+```
+
+**Diagnóstico si no llega ninguna alerta:**
+```bash
+pm2 describe pm2-discord              # revisa que discord_url quedó bien guardada
+curl -H "Content-Type: application/json" -d '{"content":"prueba manual"}' \
+  "https://discord.com/api/webhooks/TU_ID/TU_TOKEN"   # prueba el webhook fuera de PM2
+PM2_DISCORD_DEBUG=1 pm2 install pm2-discord && pm2 logs pm2-discord   # logs verbosos
 ```
 
 ---
 
 ## ✅ Pruebas de verificación
 
-1. **Prueba de red**: abrir `http://TU_IP_ELASTICA` en el navegador → debe verse la interfaz Angular,
+1. **Prueba de red**: abrir `http://TU_IP_ELASTICA_AQUÍ` en el navegador → debe verse la interfaz Angular,
    sin necesidad de especificar `:3000`.
-2. **Prueba de resiliencia**: `pm2 stop pda-api` en EC2 → debe llegar una alerta al canal de Discord.
-   Restaurar con `pm2 start pda-api`.
+2. **Prueba de resiliencia**: `pm2 stop empleados-backend` en EC2 → debe llegar una alerta al canal de
+   Discord. Restaurar con `pm2 start empleados-backend`.
 3. **Prueba de CI/CD**: hacer un cambio visual en local, `git push origin main`, ejecutar
-   `pm2 deploy production` desde el equipo local, y refrescar el navegador sin haber tocado la consola
-   de AWS.
+   `pm2 deploy production` (desde `backend/`) en el equipo local, y refrescar el navegador sin haber
+   tocado la consola de AWS.
 
 ---
 
