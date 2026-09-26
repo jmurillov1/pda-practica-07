@@ -400,15 +400,29 @@ PM2_DISCORD_DEBUG=1 pm2 install pm2-discord && pm2 logs pm2-discord   # logs ver
    pm2 list                       # el contador "↺" (restarts) sube y el proceso vuelve a "online" solo
    ```
    Mientras tanto, la API sigue respondiendo porque los demás workers del cluster atienden las peticiones.
-4. **Reload sin downtime**: dejar un monitor corriendo en local mientras se despliega —
+4. **Reload sin downtime**: dejar un contador de OK/FAIL corriendo en local mientras se despliega —
    ```bash
-   while true; do curl -s -o /dev/null -w "%{http_code}\n" https://api.TU_DOMINIO/api/v1/health; sleep 0.2; done
+   ok=0; fail=0
+   while true; do
+     code=$(curl -s -o /dev/null -w "%{http_code}" https://api.TU_DOMINIO/api/v1/health)
+     if [ "$code" = "200" ]; then ok=$((ok+1)); else fail=$((fail+1)); echo "❌ $code en $(date +%T)"; fi
+     printf "\r✅ OK: %d   ❌ FAIL: %d" "$ok" "$fail"
+     sleep 0.2
+   done
    ```
-   y en paralelo, desde el equipo local, `pm2 deploy production`. Solo deben verse códigos `200`
-   (PM2 recarga los workers uno a uno, nunca todos a la vez).
-5. **Persistencia tras reinicio del servidor**: con `pm2 startup` + `pm2 save` ya configurados (Fase 5),
-   reiniciar la instancia EC2 (`sudo reboot`) y, al reconectar, `pm2 list` debe mostrar los procesos
-   `online` sin haber tenido que arrancarlos a mano.
+   y en paralelo, desde el equipo local, `pm2 deploy production`. El contador de `FAIL` debe quedarse en
+   `0` (PM2 recarga los workers uno a uno, nunca todos a la vez); detén con `Ctrl+C` cuando termine.
+5. **Persistencia tras reinicio del servidor** *(hecha ✅)*: con `pm2 startup` + `pm2 save` ya
+   configurados (Fase 5), se reinició la instancia EC2 (`sudo reboot`) y, al reconectar, `pm2 list`
+   mostró los procesos `online` sin haber tenido que arrancarlos a mano. Para capturar la evidencia en
+   una sola pantalla:
+   ```bash
+   uptime
+   who -b
+   pm2 list
+   ```
+   La hora de `who -b` (último arranque) debe coincidir con el uptime bajo del proceso en `pm2 list` —
+   eso prueba que PM2 lo revivió solo.
 6. **Degradación controlada del frontend**: con el backend detenido, abrir `https://app.TU_DOMINIO` —
    la interfaz (servida estáticamente desde Azure, independiente de la EC2) sigue cargando y muestra el
    mensaje de error de la petición fallida, en vez de caerse todo el sistema.
